@@ -14,5 +14,6 @@ dependencies:
   - pytorch-cuda=12.4
   - tqdm
   - scipy
+  - open3d
   - pip:
     - submodules/diff-gaussian-rasterization
