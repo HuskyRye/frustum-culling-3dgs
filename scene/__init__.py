@@ -3,7 +3,7 @@
 # GRAPHDECO research group, https://team.inria.fr/graphdeco
 # All rights reserved.
 #
-# This software is free for non-commercial, research and evaluation use 
+# This software is free for non-commercial, research and evaluation use
 # under the terms of the LICENSE.md file.
 #
 # For inquiries contact  george.drettakis@inria.fr
@@ -17,6 +17,13 @@ from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
+
+import torch
+import numpy as np
+from tqdm import tqdm
+from collections import defaultdict
+import open3d as o3d
+
 
 class Scene:
 
@@ -80,7 +87,53 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
         else:
-            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, args)
+
+        # Build frustum culling index
+        print("Building frustum culling index, will happen only the first time you open the scene.")
+        self.frustum_index = defaultdict(set)
+        for camera in tqdm(self.getTrainCameras(), "Culling progress"):
+            culled_points_mask = self.frustum_culling(scene_info.point_cloud.points, camera)
+            # print(camera.image_name)
+            self.visualize_culling(scene_info.point_cloud, culled_points_mask.cpu(), camera)
+        #     for gaussian in gaussians:
+        #         if gaussian in caemra:
+        #             self.frustum_index[camera.image_name].add(gaussian)
+
+    def visualize_culling(self, point_cloud, mask, camera):
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(point_cloud.points)
+        colors = point_cloud.colors.copy()
+        colors[mask] = [0, 1, 0]
+        pcd.colors = o3d.utility.Vector3dVector(colors)
+
+        vis = o3d.visualization.Visualizer()
+        vis.create_window()
+        vis.add_geometry(pcd)
+
+        extrinsic = np.eye(4)
+        extrinsic[:3, :3] = camera.R.T
+        extrinsic[:3, 3] = camera.T
+        view_control = vis.get_view_control()
+        camera_parameters = o3d.camera.PinholeCameraParameters()
+        camera_parameters.intrinsic = view_control.convert_to_pinhole_camera_parameters().intrinsic
+        camera_parameters.extrinsic = extrinsic
+        view_control.convert_from_pinhole_camera_parameters(camera_parameters, allow_arbitrary=True)
+
+        vis.run()
+        vis.destroy_window()
+
+    def frustum_culling(self, points, camera):
+        points_homogeneous = torch.cat([torch.tensor(points, device="cuda"), torch.ones(points.shape[0], 1, device="cuda")], dim=1)
+        # https://github.com/graphdeco-inria/gaussian-splatting/issues/826
+        points_ndc = torch.mm(points_homogeneous, camera.full_proj_transform)
+        points_ndc[:, :3] /= points_ndc[:, 3].unsqueeze(1)
+        mask = (
+            (points_ndc[:, 0].abs() <= 1)
+            & (points_ndc[:, 1].abs() <= 1)
+            & (points_ndc[:, 2].abs() <= 1)
+        )
+        return mask
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
